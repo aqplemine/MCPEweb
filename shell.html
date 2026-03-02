@@ -14,15 +14,20 @@
             height: 100%;
             overflow: hidden;
             background-color: black;
+            display: flex;
+            align-items: center;
+            justify-content: center;
             touch-action: none;
             /* Prevent browser scroll/zoom on touch */
         }
 
         canvas.emscripten {
-            width: 100%;
-            height: 100%;
+            /* Fills the whole window – the C++ renderer now sets its
+               resolution from window.innerWidth/Height dynamically */
             display: block;
             outline: none;
+            width: 100vw;
+            height: 100vh;
         }
     </style>
 </head>
@@ -35,14 +40,120 @@
             canvas: (function () { return document.getElementById('canvas'); })()
         };
 
-        // Prevent double tap zooming and default touch behaviors to allow pure game control
-        document.addEventListener('touchstart', function (e) {
-            // Do not preventDefault on input, textarea, button, or select elements
-            var t = e.target.tagName;
-            if (t !== 'INPUT' && t !== 'TEXTAREA' && t !== 'BUTTON' && t !== 'SELECT' && t !== 'OPTION') {
-                e.preventDefault();
+        // ─── Multi-touch → Mouse event translation ──────────────────────────────────
+        // Emscripten's SDL layer listens for MouseEvents on the canvas.
+        // We synthesise those events from Touch data so that:
+        //   • Every touch point generates correct mousemove / mousedown / mouseup.
+        //   • Coordinates are scaled from CSS pixels to canvas logical pixels
+        //     (accounting for letterboxing via getBoundingClientRect).
+        //   • All touches are tracked independently so multi-touch doesn't break.
+        // ────────────────────────────────────────────────────────────────────────────
+
+        (function () {
+            var canvas = document.getElementById('canvas');
+
+            /**
+             * Convert a CSS-pixel touch coordinate to the canvas logical pixel
+             * coordinate, taking letterboxing into account.
+             */
+            function toCanvasCoords(touch) {
+                var rect = canvas.getBoundingClientRect();
+                // The canvas element may be letterboxed (object-fit:contain).
+                // rect.width / rect.height = displayed size in CSS pixels.
+                // canvas.width / canvas.height = logical render size in pixels.
+                var scaleX = canvas.width / rect.width;
+                var scaleY = canvas.height / rect.height;
+                return {
+                    x: (touch.clientX - rect.left) * scaleX,
+                    y: (touch.clientY - rect.top) * scaleY
+                };
             }
-        }, { passive: false });
+
+            /**
+             * Dispatch a synthetic MouseEvent on the canvas with the given
+             * type and position (already in canvas/page-relative CSS pixels,
+             * because the SDL event handler reads clientX/clientY).
+             */
+            function dispatchMouse(type, touch, button) {
+                var rect = canvas.getBoundingClientRect();
+                var ev = new MouseEvent(type, {
+                    bubbles: true,
+                    cancelable: true,
+                    view: window,
+                    button: button,
+                    buttons: (type === 'mouseup') ? 0 : 1,
+                    clientX: touch.clientX,
+                    clientY: touch.clientY,
+                    screenX: touch.screenX,
+                    screenY: touch.screenY
+                });
+                canvas.dispatchEvent(ev);
+            }
+
+            // Map touch identifier → button used when the touch began.
+            // Primary touch (first active) → button 0 (left click = look/interact).
+            // Additional touches → button 2 (right click) so they can be used for
+            // secondary actions without disrupting the primary look touch.
+            var activeTouches = {};
+
+            function primaryTouchId() {
+                var ids = Object.keys(activeTouches);
+                return ids.length > 0 ? parseInt(ids[0]) : -1;
+            }
+
+            canvas.addEventListener('touchstart', function (e) {
+                e.preventDefault();
+                for (var i = 0; i < e.changedTouches.length; i++) {
+                    var touch = e.changedTouches[i];
+                    // First touch gets button=0 (left), subsequent get button=2 (right)
+                    var button = (Object.keys(activeTouches).length === 0) ? 0 : 2;
+                    activeTouches[touch.identifier] = button;
+                    dispatchMouse('mousemove', touch, button);
+                    dispatchMouse('mousedown', touch, button);
+                }
+            }, { passive: false });
+
+            canvas.addEventListener('touchmove', function (e) {
+                e.preventDefault();
+                for (var i = 0; i < e.changedTouches.length; i++) {
+                    var touch = e.changedTouches[i];
+                    var button = activeTouches[touch.identifier];
+                    if (button === undefined) button = 0;
+                    dispatchMouse('mousemove', touch, button);
+                }
+            }, { passive: false });
+
+            canvas.addEventListener('touchend', function (e) {
+                e.preventDefault();
+                for (var i = 0; i < e.changedTouches.length; i++) {
+                    var touch = e.changedTouches[i];
+                    var button = activeTouches[touch.identifier];
+                    if (button === undefined) button = 0;
+                    dispatchMouse('mouseup', touch, button);
+                    delete activeTouches[touch.identifier];
+                }
+            }, { passive: false });
+
+            canvas.addEventListener('touchcancel', function (e) {
+                e.preventDefault();
+                for (var i = 0; i < e.changedTouches.length; i++) {
+                    var touch = e.changedTouches[i];
+                    var button = activeTouches[touch.identifier];
+                    if (button === undefined) button = 0;
+                    dispatchMouse('mouseup', touch, button);
+                    delete activeTouches[touch.identifier];
+                }
+            }, { passive: false });
+
+            // Block document-level default touch behaviours (scroll / zoom),
+            // but only for non-input elements (the existing rule).
+            document.addEventListener('touchstart', function (e) {
+                var t = e.target.tagName;
+                if (t !== 'INPUT' && t !== 'TEXTAREA' && t !== 'BUTTON' && t !== 'SELECT' && t !== 'OPTION') {
+                    e.preventDefault();
+                }
+            }, { passive: false });
+        })();
     </script>
     {{{ SCRIPT }}}
 </body>
